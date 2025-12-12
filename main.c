@@ -9,6 +9,33 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
+static OSStatus getAudioDeviceList(AudioDeviceID **devices, UInt32 *deviceCount) {
+    AudioObjectPropertyAddress propertyAddress = {
+        .mSelector = kAudioHardwarePropertyDevices,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
+    };
+
+    UInt32 size = 0;
+    OSStatus err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &size);
+    if (err != noErr) {
+        return err;
+    }
+
+    *deviceCount = size / sizeof(AudioDeviceID);
+    *devices = malloc(size);
+    if (!*devices) {
+        return kAudioHardwareBadDeviceError;
+    }
+
+    err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &size, *devices);
+    if (err != noErr) {
+        free(*devices);
+        *devices = NULL;
+    }
+    return err;
+}
+
 // Function declarations
 static OSStatus setDefaultOutputDevice(AudioDeviceID deviceID);
 
@@ -16,53 +43,48 @@ static AudioDeviceID getCurrentDefaultOutputDevice() {
     AudioDeviceID deviceID;
     UInt32 size = sizeof(deviceID);
     AudioObjectPropertyAddress addr = {
-        kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
+        .mSelector = kAudioHardwarePropertyDefaultOutputDevice,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
     };
 
-    OSStatus err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &deviceID);
-    if (err != noErr) {
-        return kAudioObjectUnknown;
-    }
-    return deviceID;
+    return (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &deviceID) == noErr) 
+           ? deviceID : kAudioObjectUnknown;
 }
 
 static char* getDeviceName(AudioDeviceID deviceID) {
     CFStringRef deviceName = NULL;
     UInt32 size = sizeof(deviceName);
     AudioObjectPropertyAddress addr = {
-        kAudioObjectPropertyName,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
+        .mSelector = kAudioObjectPropertyName,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
     };
 
-    OSStatus err = AudioObjectGetPropertyData(deviceID, &addr, 0, NULL, &size, &deviceName);
-    if (err != noErr || deviceName == NULL) {
+    if (AudioObjectGetPropertyData(deviceID, &addr, 0, NULL, &size, &deviceName) != noErr || !deviceName) {
         return NULL;
     }
 
-    char* nameBuf = malloc(256);
-    if (!nameBuf) {
-        CFRelease(deviceName);
-        return NULL;
-    }
+    // Get the actual required buffer size
+    CFIndex nameLength = CFStringGetLength(deviceName);
+    CFIndex maxSize = CFStringGetMaximumSizeForEncoding(nameLength, kCFStringEncodingUTF8) + 1;
 
-    if (CFStringGetCString(deviceName, nameBuf, 256, kCFStringEncodingUTF8)) {
+    char* nameBuf = malloc(maxSize);
+    if (nameBuf && CFStringGetCString(deviceName, nameBuf, maxSize, kCFStringEncodingUTF8)) {
         CFRelease(deviceName);
         return nameBuf;
-    } else {
-        CFRelease(deviceName);
-        free(nameBuf);
-        return NULL;
     }
+
+    CFRelease(deviceName);
+    free(nameBuf);
+    return NULL;
 }
 
 static bool deviceSupportsOutput(AudioDeviceID deviceID) {
     AudioObjectPropertyAddress addr = {
-        kAudioDevicePropertyStreamConfiguration,
-        kAudioDevicePropertyScopeOutput,
-        kAudioObjectPropertyElementMain
+        .mSelector = kAudioDevicePropertyStreamConfiguration,
+        .mScope = kAudioDevicePropertyScopeOutput,
+        .mElement = kAudioObjectPropertyElementMain
     };
 
     UInt32 size = 0;
@@ -95,32 +117,11 @@ static bool deviceSupportsOutput(AudioDeviceID deviceID) {
 }
 
 static void listAudioDevices() {
-    UInt32 size = 0;
-    OSStatus err;
-    AudioObjectPropertyAddress propertyAddress;
+    AudioDeviceID *devices;
+    UInt32 deviceCount;
 
-    // Get size needed for device list
-    propertyAddress.mSelector = kAudioHardwarePropertyDevices;
-    propertyAddress.mScope = kAudioObjectPropertyScopeGlobal;
-    propertyAddress.mElement = kAudioObjectPropertyElementMain;
-
-    err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &size);
-    if (err != noErr) {
-        fprintf(stderr, "Error getting device list size: %d\n", (int)err);
-        return;
-    }
-
-    UInt32 deviceCount = size / sizeof(AudioDeviceID);
-    AudioDeviceID *devices = (AudioDeviceID*)malloc(size);
-    if (!devices) {
-        fprintf(stderr, "Error allocating memory for device list\n");
-        return;
-    }
-
-    err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &size, devices);
-    if (err != noErr) {
-        fprintf(stderr, "Error getting device list: %d\n", (int)err);
-        free(devices);
+    if (getAudioDeviceList(&devices, &deviceCount) != noErr) {
+        fprintf(stderr, "Error getting device list\n");
         return;
     }
 
@@ -129,7 +130,6 @@ static void listAudioDevices() {
     printf("Available Audio Output Devices:\n");
     printf("================================\n");
 
-    int outputDeviceCount = 0;
     for (UInt32 i = 0; i < deviceCount; ++i) {
         AudioDeviceID dev = devices[i];
 
@@ -140,9 +140,8 @@ static void listAudioDevices() {
 
         char* deviceName = getDeviceName(dev);
         if (deviceName) {
-            outputDeviceCount++;
             if (dev == currentDefault) {
-                printf("* %s (current default)\n", deviceName);
+                printf("* %s\n", deviceName);
             } else {
                 printf("  %s\n", deviceName);
             }
@@ -150,105 +149,62 @@ static void listAudioDevices() {
         }
     }
 
-    if (outputDeviceCount == 0) {
-        printf("No output devices found.\n");
-    } else {
-        printf("\nFound %d output device(s).\n", outputDeviceCount);
-        printf("* indicates current default device\n");
-    }
-
     free(devices);
 }
 
 static void switchToNextDevice() {
-    UInt32 size = 0;
-    OSStatus err;
-    AudioObjectPropertyAddress propertyAddress;
+    AudioDeviceID *devices;
+    UInt32 deviceCount;
 
-    // Get size needed for device list
-    propertyAddress.mSelector = kAudioHardwarePropertyDevices;
-    propertyAddress.mScope = kAudioObjectPropertyScopeGlobal;
-    propertyAddress.mElement = kAudioObjectPropertyElementMain;
-
-    err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &size);
-    if (err != noErr) {
-        fprintf(stderr, "Error getting device list size: %d\n", (int)err);
+    if (getAudioDeviceList(&devices, &deviceCount) != noErr) {
+        fprintf(stderr, "Error getting device list\n");
         return;
     }
 
-    UInt32 deviceCount = size / sizeof(AudioDeviceID);
-    AudioDeviceID *devices = (AudioDeviceID*)malloc(size);
-    if (!devices) {
-        fprintf(stderr, "Error allocating memory for device list\n");
-        return;
-    }
-
-    err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &size, devices);
-    if (err != noErr) {
-        fprintf(stderr, "Error getting device list: %d\n", (int)err);
-        free(devices);
-        return;
-    }
-
-    // Get current default device
     AudioDeviceID currentDefault = getCurrentDefaultOutputDevice();
-
-    // Build array of output devices
-    AudioDeviceID *outputDevices = malloc(deviceCount * sizeof(AudioDeviceID));
+    AudioDeviceID outputDevices[deviceCount]; // VLA for small arrays
     int outputCount = 0;
+    int currentIndex = -1;
 
+    // Single pass: build output array and find current device
     for (UInt32 i = 0; i < deviceCount; i++) {
         if (deviceSupportsOutput(devices[i])) {
-            outputDevices[outputCount] = devices[i];
-            outputCount++;
+            if (devices[i] == currentDefault) {
+                currentIndex = outputCount;
+            }
+            outputDevices[outputCount++] = devices[i];
         }
     }
+
+    free(devices);
 
     if (outputCount <= 1) {
         printf("Only one or no output devices available. Cannot switch.\n");
-        free(devices);
-        free(outputDevices);
         return;
     }
 
-    // Find current device in the output list and get next one
-    int currentIndex = -1;
-    for (int i = 0; i < outputCount; i++) {
-        if (outputDevices[i] == currentDefault) {
-            currentIndex = i;
-            break;
-        }
-    }
-
-    // Calculate next device index (wrap around to beginning if at end)
     int nextIndex = (currentIndex + 1) % outputCount;
     AudioDeviceID nextDevice = outputDevices[nextIndex];
 
-    // Get device names for display
     char* currentName = getDeviceName(currentDefault);
     char* nextName = getDeviceName(nextDevice);
 
-    // Switch to next device
-    err = setDefaultOutputDevice(nextDevice);
-    if (err != noErr) {
-        fprintf(stderr, "Failed to set default output device: %d\n", (int)err);
-    } else {
+    if (setDefaultOutputDevice(nextDevice) == noErr) {
         printf("Switched from \"%s\" to \"%s\"\n",
-               currentName ? currentName : "Unknown",
-               nextName ? nextName : "Unknown");
+               currentName ?: "Unknown", nextName ?: "Unknown");
+    } else {
+        fprintf(stderr, "Failed to set default output device\n");
     }
 
-    if (currentName) free(currentName);
-    if (nextName) free(nextName);
-    free(devices);
-    free(outputDevices);
+    free(currentName);
+    free(nextName);
 }
 
 static OSStatus setDefaultOutputDevice(AudioDeviceID deviceID) {
     AudioObjectPropertyAddress addr = {
-        kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
+        .mSelector = kAudioHardwarePropertyDefaultOutputDevice,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
     };
     UInt32 size = sizeof(deviceID);
     return AudioObjectSetPropertyData(kAudioObjectSystemObject,
@@ -260,35 +216,18 @@ static OSStatus setDefaultOutputDevice(AudioDeviceID deviceID) {
 }
 
 static AudioDeviceID findDeviceByName(const char* wantedName) {
-    UInt32 size = 0;
-    OSStatus err;
-    AudioObjectPropertyAddress propertyAddress;
+    AudioDeviceID *devices;
+    UInt32 deviceCount;
 
-    // Get size needed for device list using modern API
-    propertyAddress.mSelector = kAudioHardwarePropertyDevices;
-    propertyAddress.mScope = kAudioObjectPropertyScopeGlobal;
-    propertyAddress.mElement = kAudioObjectPropertyElementMain;
-
-    err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &size);
-    if (err != noErr) {
-        fprintf(stderr, "Error getting device list size: %d\n", (int)err);
+    if (getAudioDeviceList(&devices, &deviceCount) != noErr) {
         return kAudioObjectUnknown;
     }
 
-    UInt32 deviceCount = size / sizeof(AudioDeviceID);
-    AudioDeviceID *devices = (AudioDeviceID*)malloc(size);
-    if (!devices) return kAudioObjectUnknown;
-
-    err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &size, devices);
-    if (err != noErr) {
-        fprintf(stderr, "Error getting device list: %d\n", (int)err);
-        free(devices);
-        return kAudioObjectUnknown;
-    }
+    size_t wantedLen = strlen(wantedName);
 
     AudioDeviceID found = kAudioObjectUnknown;
 
-    for (UInt32 i = 0; i < deviceCount; ++i) {
+    for (UInt32 i = 0; i < deviceCount && found == kAudioObjectUnknown; ++i) {
         AudioDeviceID dev = devices[i];
 
         // Only consider devices that support output
@@ -298,11 +237,9 @@ static AudioDeviceID findDeviceByName(const char* wantedName) {
 
         char* deviceName = getDeviceName(dev);
         if (deviceName) {
-            // Compare with wanted name
-            if (strcmp(deviceName, wantedName) == 0) {
+            // Compare with wanted name using length check first
+            if (strlen(deviceName) == wantedLen && memcmp(deviceName, wantedName, wantedLen) == 0) {
                 found = dev;
-                free(deviceName);
-                break;
             }
             free(deviceName);
         }
